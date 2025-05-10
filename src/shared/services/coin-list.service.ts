@@ -44,14 +44,14 @@ export class CoinListService {
       this.logger.warn('COINMARKETCAP_API_KEY not set');
     }
     // Initial load
-    void this.updateCoinList().then(() => {
+    void this.updateBinanceCoinList().then(() => {
       this.isInitialized = true;
       this.logger.log('Coin list initialized successfully');
     });
   }
 
   @Cron(CronExpression.EVERY_HOUR)
-  async updateCoinList(): Promise<void> {
+  async updateHyperliquidCoinList(): Promise<void> {
     try {
       const [hyperliquidCoins, cmcCoins] = await Promise.all([
         this.getHyperliquidCoins(),
@@ -67,6 +67,40 @@ export class CoinListService {
 
       // Combine Hyperliquid and CMC data
       for (const coin of hyperliquidCoins) {
+        const upperSymbol = coin.symbol.toUpperCase();
+        const cmcInfo = cmcInfoMap.get(upperSymbol);
+
+        this.coins.set(coin.symbol, {
+          id: coin.id,
+          symbol: coin.symbol,
+          name: cmcInfo?.name || coin.name, // Use CMC name if available
+        });
+      }
+
+      // this.logger.debug('Updated coins:', this.coins);
+      this.logger.log(`Updated coin list. Total coins: ${this.coins.size}`);
+    } catch (error) {
+      this.logger.error('Failed to update coin list:', error);
+    }
+  }
+
+  @Cron(CronExpression.EVERY_HOUR)
+  async updateBinanceCoinList(): Promise<void> {
+    try {
+      const [binanceCoins, cmcCoins] = await Promise.all([
+        this.getBinanceCoins(),
+        this.getCMCCoins(),
+      ]);
+
+      this.coins.clear();
+
+      // Create a map of CMC info by symbol for quick lookup
+      const cmcInfoMap = new Map(
+        cmcCoins.map((coin) => [coin.symbol.toUpperCase(), coin]),
+      );
+
+      // Combine Hyperliquid and CMC data
+      for (const coin of binanceCoins) {
         const upperSymbol = coin.symbol.toUpperCase();
         const cmcInfo = cmcInfoMap.get(upperSymbol);
 
@@ -103,6 +137,30 @@ export class CoinListService {
       }));
     } catch (error) {
       this.logger.error('Failed to fetch Hyperliquid coins:', error);
+      return [];
+    }
+  }
+  
+  private async getBinanceCoins(): Promise<CoinInfo[]> {
+    try {
+      const { data } = await firstValueFrom(
+        this.httpService.get(
+          'https://fapi.binance.com/fapi/v1/ticker/price',
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+
+      return data
+      .filter(({ symbol }) => symbol.endsWith("USDT"))
+      .map(({ symbol }) => ({
+        id: symbol.replace("USDT", "").toLowerCase(),
+        symbol: symbol.replace("USDT", "").toLowerCase(),
+        name: symbol.replace("USDT", "").toUpperCase(),
+      }));
+    } catch (error) {
+      this.logger.error('Failed to fetch Binance coins:', error);
       return [];
     }
   }

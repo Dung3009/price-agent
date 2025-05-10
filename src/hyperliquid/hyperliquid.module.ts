@@ -7,18 +7,19 @@ import { TradingMonitorJob } from './jobs/trading-monitor.job';
 import { TraderAnalysisService } from './services/trader-analysis.service';
 import { TradingAgentService } from './services/trading-agent.service';
 import { TraderController } from './controllers/trader.controller';
+import { LeaderboardController } from './controllers/leaderboard.controller';
 import { SharedModule } from '../shared/shared.module';
 
 @Module({
   imports: [HttpModule, ConfigModule, SharedModule],
-  controllers: [TraderController],
+//  controllers: [TraderController ,LeaderboardController],
   providers: [
-    LeaderboardService,
-    LeaderboardSyncJob,
+  //  LeaderboardService,
+  //  LeaderboardSyncJob,
     TradingMonitorJob,
-    TraderAnalysisService,
+  //  TraderAnalysisService,
     TradingAgentService,
   ],
-  exports: [LeaderboardService, TraderAnalysisService, TradingAgentService],
+  //exports: [TradingAgentService],
 })
 export class HyperliquidModule {}

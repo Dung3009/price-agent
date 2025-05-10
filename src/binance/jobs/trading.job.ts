@@ -1,9 +1,13 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { TradingAgentService } from '../services/trading-agent.service';
+import { AnalyzeTechnicalService } from '../services/analyze-technical-binance.service';
 import { CacheService } from '../../shared/services/cache.service';
 import { CoinListService } from 'src/shared';
-import { TradingSignal } from '../services/trading-agent.service';
+import { TradingSignal } from '../services/analyze-technical-binance.service';
+import { TradeService } from '../services/trading-binance.service';
+import { PairFormatHelper } from '../../shared/helper/pair-format.helper';
+import { RiskManagementService } from '../services/risk-management.service';
+
 
 interface TradingOpportunity {
   coin: string;
@@ -17,22 +21,23 @@ interface TradingOpportunity {
 }
 
 @Injectable()
-export class TradingMonitorJob {
-  private readonly logger = new Logger(TradingMonitorJob.name);
+export class TradingJob {
+  private readonly logger = new Logger(TradingJob.name);
   private monitoredCoins: string[] = [];
   private readonly BATCH_SIZE = 10; // Process 5 coins at a time
   private readonly BATCH_DELAY = 2000; // 2 seconds between batches
 
   constructor(
-    private readonly tradingAgentService: TradingAgentService,
+    private readonly tradingAgentService: AnalyzeTechnicalService,
     private readonly cacheService: CacheService,
     private readonly coinListService: CoinListService,
+    private tradeService: TradeService,
+    private riskService : RiskManagementService,
   ) {
     setTimeout(() => {
       this.monitoredCoins = this.coinListService
         .getSupportedCoins()
         .map((coin) => coin.symbol.toUpperCase());
-      // this.monitoredCoins = ['SNX'];
       this.logger.log(`Initialized with ${this.monitoredCoins.length} coins`);
       void this.monitorTradingOpportunities('Day Trading');
     }, 10000);
@@ -69,6 +74,35 @@ export class TradingMonitorJob {
                 timestamp: Date.now(),
               });
               this.logSignal(signal);
+              try {
+                const coinFormatted = await PairFormatHelper.formatPair(coin,'BINANCE');
+                const riskCheck = await this.riskService.canTrade(coinFormatted);
+                if (!riskCheck.canTrade) {
+                  this.logger.warn(
+                    `Trading blocked for ${coinFormatted}: ${riskCheck.reason}`,
+                  );
+                  return;
+                }
+
+                const takeProfitRatio = signal.takeProfit / signal.entryPrice;
+                const stopLossRatio = signal.stopLoss / signal.entryPrice;
+                const side = signal.side === 'long' ? 'BUY' : 'SELL';
+                 
+
+                const tradeResult = await this.tradeService.executeTrade(
+                  coinFormatted,
+                  side,
+                  takeProfitRatio,
+                  stopLossRatio,
+                );
+                this.logger.log(
+                  `Trade executed for ${coinFormatted}: ${JSON.stringify(tradeResult)}`,
+                );
+              } catch (error: any) {
+                this.logger.error(
+                  `Error executing trade for ${signal.coin}: ${error.message}`,
+                );
+              }
             }
           }),
         );
@@ -131,7 +165,7 @@ export class TradingMonitorJob {
 
     this.logger.log(`
 Signal Found: ${signal.coin} - ${signal.side.toUpperCase()} (${signal.confidence}% confidence)
-Entry: $${Number(signal.entryPrice).toFixed(4)} | SL: $${Number(signal.stopLoss).toFixed(4)} | TP: $${Number(signal.takeProfit).toFixed(4)}
+Entry: $${Number(signal.entryPrice).toFixed(6)} | SL: $${Number(signal.stopLoss).toFixed(6)} | TP: $${Number(signal.takeProfit).toFixed(6)}
 R/R Ratio: ${riskReward}
 Reasons: ${signal.reason.join(', ')}
 `);

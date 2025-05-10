@@ -1,4 +1,4 @@
-import { Candle } from '../../shared/types/candle.type';
+import { Candle } from '../types/candle.type';
 
 export interface MACD {
   value: number;

@@ -1,13 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { Candle, CandleHyperliquidResponse } from '../types/candle.type';
-import { PairFormatHelper } from '../helper/pair-format.helper';
+import { Candle, CandleBinanceResponse } from '../../shared/types/candle.type';
+import { PairFormatHelper } from '../../shared/helper/pair-format.helper';
 
 @Injectable()
 export class HistoricalDataService {
   private readonly logger = new Logger(HistoricalDataService.name);
-  private readonly API_URL = 'https://api-ui.hyperliquid.xyz/info';
+  private readonly API_URL = 'https://fapi.binance.com/fapi/v1/continuousKlines';
   private readonly requestQueue: Array<() => Promise<void>> = [];
   private isProcessingQueue = false;
   private lastRequestTime = 0;
@@ -23,7 +23,7 @@ export class HistoricalDataService {
     return new Promise((resolve) => {
       this.requestQueue.push(async () => {
         try {
-          const symbolFormatted = await PairFormatHelper.formatPair(symbol)
+          const symbolFormatted = await PairFormatHelper.formatPair(symbol,'BINANCE');
           
           const candles = await this.fetchCandlesWithRetry(
             symbolFormatted,
@@ -92,26 +92,15 @@ export class HistoricalDataService {
       // this.logger.debug(
       //   `Fetching candles for ${symbol} (attempt ${retryCount + 1}/${maxRetries + 1})`,
       // );
-
       const { data } = await firstValueFrom(
-        this.httpService.post<CandleHyperliquidResponse[]>(
-          this.API_URL,
-          {
-            type: 'candleSnapshot',
-            req: {
-              coin: symbol,
-              interval,
-              startTime,
-              endTime,
-            },
-          },
+        this.httpService.get<CandleBinanceResponse[]>(
+          `${this.API_URL}?pair=${symbol}&contractType=PERPETUAL&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${limit}`,
           {
             timeout: 10000, // 10 second timeout
-          },
-        ),
+          }
+        )
       );
-
-      return data.map((response) => this.mapResponseToCandle(response));
+      return data.map((response) => this.mapResponseToCandle(response, symbol, interval));
     } catch (error) {
       if (retryCount < maxRetries) {
         // this.logger.warn(
@@ -129,16 +118,16 @@ export class HistoricalDataService {
     }
   }
 
-  private mapResponseToCandle(response: CandleHyperliquidResponse): Candle {
+  private mapResponseToCandle(response: CandleBinanceResponse, symbol, interval): Candle {
     return {
-      timestamp: response.t,
-      open: parseFloat(response.o),
-      high: parseFloat(response.h),
-      low: parseFloat(response.l),
-      close: parseFloat(response.c),
-      volume: parseFloat(response.v),
-      symbol: response.s,
-      interval: response.i,
+      timestamp: response[0],
+      open: parseFloat(response[1]),
+      high: parseFloat(response[2]),
+      low: parseFloat(response[3]),
+      close: parseFloat(response[4]),
+      volume: parseFloat(response[5]),
+      symbol,
+      interval,
     };
   }
 

@@ -18,7 +18,7 @@ import {
   TechnicalAnalysisUtil,
   MACD,
   SupportResistance,
-} from '../utils/technical-analysis.util';
+} from '../../shared/utils/technical-analysis.util';
 
 interface TradingMetrics {
   totalTrades: number;

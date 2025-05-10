@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { HistoricalDataService } from '../../shared/services/historical-data.service';
+import { HistoricalDataService } from './historical-data-binance.service';
 import { Candle } from '../../shared/types/candle.type';
 import { TechnicalAnalysisUtil } from '../../shared/utils/technical-analysis.util';
 import { PairFormatHelper } from 'src/shared/helper/pair-format.helper';
@@ -44,12 +44,13 @@ interface StyleAnalysis {
 }
 
 @Injectable()
-export class TradingAgentService {
-  private readonly logger = new Logger(TradingAgentService.name);
-  private readonly API_URL = 'https://api.hyperliquid.xyz/info';
+export class AnalyzeTechnicalService {
+  private readonly logger = new Logger(AnalyzeTechnicalService.name);
+  private readonly API_URL = 'https://fapi.binance.com';
   private cachedPrices: Map<string, number> = new Map();
   private lastPriceUpdate = 0;
   private readonly PRICE_TTL = 2 * 60 * 1000; // 2 minutes
+  private readonly exchange = 'BINANCE';
 
   constructor(
     private readonly httpService: HttpService,
@@ -519,7 +520,6 @@ export class TradingAgentService {
           this.historicalDataService.getCandles(coin, '4h', 150),
           this.getCurrentPrice(coin),
         ]);
-
       if (!currentPrice || candles3m.length < 50) {
         return null;
       }
@@ -612,7 +612,10 @@ export class TradingAgentService {
         this.cachedPrices = await this.getCurrentPrices();
         this.lastPriceUpdate = Date.now();
       }
-      const formattedCoin = await PairFormatHelper.formatPair(coin);
+      const formattedCoin = await PairFormatHelper.formatPair(
+        coin,
+        this.exchange,
+      );
 
       const price = this.cachedPrices.get(formattedCoin);
       if (!price) {
@@ -630,16 +633,20 @@ export class TradingAgentService {
   private async getCurrentPrices(): Promise<Map<string, number>> {
     try {
       const response = await firstValueFrom(
-        this.httpService.post<Record<string, number>>(
-          this.API_URL,
-          { type: 'allMids' },
-          {
-            headers: { 'Content-Type': 'application/json' },
-          },
-        ),
+        this.httpService.get(this.API_URL + '/fapi/v2/ticker/price', {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      const data = response.data;
+      const formatResponse: Record<string, number> = data.reduce(
+        (acc, item) => {
+          acc[item.symbol] = item.price; // Giữ price dưới dạng chuỗi
+          return acc;
+        },
+        {},
       );
 
-      return new Map(Object.entries(response.data));
+      return new Map(Object.entries(formatResponse));
     } catch (error) {
       this.logger.error('Failed to fetch current prices:', error);
       return new Map();
