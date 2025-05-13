@@ -31,7 +31,7 @@ export class TradingJob {
     private readonly tradingAgentService: AnalyzeTechnicalService,
     private readonly cacheService: CacheService,
     private readonly coinListService: CoinListService,
-    private tradeService: TradeService,
+    private readonly tradeService: TradeService,
     private riskService : RiskManagementService,
   ) {
     setTimeout(() => {
@@ -47,9 +47,33 @@ export class TradingJob {
   async monitorTradingOpportunities(
     style?: 'Scalping' | 'Day Trading' | 'Swing Trading' | 'Position Trading',
   ) {
-    this.logger.log(`Scanning for ${style || 'all'} trading opportunities...`);
+    this.logger.log('Checking risks and scanning for trading opportunities...');
 
     try {
+      // Check news restrictions
+      const newsCheck = await this.riskService.restrictTradingByNews();
+      if (!newsCheck.canTrade) {
+        this.logger.warn(`Risk detected: ${newsCheck.reason}`);
+        await this.tradeService.closeAllPositions();
+        this.logger.log('Closed all positions due to significant news');
+        return;
+      }
+
+      // Check unrealized losses
+      const unrealizedLossCheck = await this.riskService.checkUnrealizedLoss();
+      if (!unrealizedLossCheck.canTrade) {
+        this.logger.warn(`Risk detected: ${unrealizedLossCheck.reason}`);
+        return;
+      }
+
+      // Check available margin
+      const availableMargin = await this.tradeService.getAvailableMargin();
+      if (availableMargin <= 1) {
+        this.logger.warn(`Insufficient margin: ${availableMargin}. Minimum required: 1`);
+        return;
+      }
+
+      this.logger.log(`Scanning for ${style || 'all'} trading opportunities...`);
       const opportunities: TradingOpportunity[] = [];
 
       // Process coins in batches
@@ -84,16 +108,12 @@ export class TradingJob {
                   return;
                 }
 
-                const takeProfitRatio = signal.takeProfit / signal.entryPrice;
-                const stopLossRatio = signal.stopLoss / signal.entryPrice;
                 const side = signal.side === 'long' ? 'BUY' : 'SELL';
-                 
-
                 const tradeResult = await this.tradeService.executeTrade(
                   coinFormatted,
                   side,
-                  takeProfitRatio,
-                  stopLossRatio,
+                  Number(signal.takeProfit.toFixed(6)),
+                  Number(signal.stopLoss.toFixed(6)),
                 );
                 this.logger.log(
                   `Trade executed for ${coinFormatted}: ${JSON.stringify(tradeResult)}`,
@@ -164,11 +184,11 @@ export class TradingJob {
     ).toFixed(4);
 
     this.logger.log(`
-Signal Found: ${signal.coin} - ${signal.side.toUpperCase()} (${signal.confidence}% confidence)
-Entry: $${Number(signal.entryPrice).toFixed(6)} | SL: $${Number(signal.stopLoss).toFixed(6)} | TP: $${Number(signal.takeProfit).toFixed(6)}
-R/R Ratio: ${riskReward}
-Reasons: ${signal.reason.join(', ')}
-`);
+      Signal Found: ${signal.coin} - ${signal.side.toUpperCase()} (${signal.confidence}% confidence)
+      Entry: $${Number(signal.entryPrice).toFixed(6)} | SL: $${Number(signal.stopLoss).toFixed(6)} | TP: $${Number(signal.takeProfit).toFixed(6)}
+      R/R Ratio: ${riskReward}
+      Reasons: ${signal.reason.join(', ')}
+      `);
   }
 
   private logSummary(opportunities: TradingOpportunity[]) {

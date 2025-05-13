@@ -4,17 +4,10 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import axios from 'axios';
 import * as crypto from 'crypto';
 import { TradeService } from '../services/trading-binance.service';
-
-
-/**
- * Interface for news item with impact classification.
- */
-interface NewsItem {
-  id: string;
-  title: string;
-  timestamp: number; // Unix timestamp in ms
-  impact: 'HIGH' | 'MEDIUM' | 'LOW' | 'HOLIDAY';
-}
+import { NewsService } from './news.service';
+import { NewsItem } from '../../shared/interfaces/news.interface';
+import { config } from 'dotenv';
+config();
 
 /**
  * Interface for risk check result.
@@ -29,17 +22,20 @@ export class RiskManagementService {
   private readonly logger = new Logger(RiskManagementService.name);
   private initialMargin: number | null = null;
   private marginFetchTime: number | null = null;
-  private readonly BASE_URL = 'https://testnet.binancefuture.com';
+  private readonly BASE_URL = process.env.BINANCE_URL;
   private readonly MAX_LOSS_PERCENTAGE = 0.1; // 10%
   private readonly NEWS_WINDOW_MINUTES = 30; // 30 minutes before/after high-impact news
-  private readonly NEWS_API_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
-  private readonly NEWS_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+  private readonly NEWS_API_URL = process.env.NEWS_API_URL;
+  private readonly NEWS_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
   private cachedNews: NewsItem[] = [];
   private lastNewsFetch: number | null = null;
+  private readonly RESTRICT_ONE_POSITION = true; // Temporary for testing
+  private isTradingBlocked = false; // Flag to block trading after forced closure
 
   constructor(
     private configService: ConfigService,
     private tradeService: TradeService,
+    private newsService: NewsService,
   ) {
     this.logger.debug(`Crypto module: ${typeof crypto}, createHmac: ${typeof crypto?.createHmac}`);
     this.fetchInitialMargin().catch((error) =>
@@ -73,8 +69,8 @@ export class RiskManagementService {
    * @throws Error if the API call fails.
    */
   private async callBinanceApi(method: string, endpoint: string, params: any = {}): Promise<any> {
-    const apiKey = this.configService.get<string>('BINANCE_TESTNET_APIKEY');
-    const apiSecret = this.configService.get<string>('BINANCE_TESTNET_APISECRET');
+    const apiKey = this.configService.get<string>('BINANCE_APIKEY');
+    const apiSecret = this.configService.get<string>('BINANCE_APISECRET');
     if (!apiKey || !apiSecret) {
       this.logger.error('API key or secret is not configured');
       throw new Error('API key or secret is not configured');
@@ -95,7 +91,7 @@ export class RiskManagementService {
     } catch (error: any) {
       const errorMsg = error.response?.data?.msg || error.message;
       this.logger.error(`Failed to call API ${endpoint}: ${errorMsg}`);
-      throw new Error(`Lỗi API: ${errorMsg}`);
+      throw new Error(`Error API: ${errorMsg}`);
     }
   }
 
@@ -103,12 +99,13 @@ export class RiskManagementService {
    * Fetches total margin balance at the start of the day.
    * Runs daily at 00:00 UTC.
    */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_12_HOURS)
   async fetchInitialMargin(): Promise<void> {
     try {
       const account = await this.callBinanceApi('GET', '/fapi/v2/account');
       this.initialMargin = parseFloat(account.totalMarginBalance);
       this.marginFetchTime = Date.now();
+      this.isTradingBlocked = false; // Reset trading block on new margin fetch
       this.logger.log(`Fetched initial margin: ${this.initialMargin} USDT at ${new Date(this.marginFetchTime).toISOString()}`);
     } catch (error: any) {
       this.logger.error(`Failed to fetch initial margin: ${error.message}`);
@@ -117,124 +114,54 @@ export class RiskManagementService {
   }
 
   /**
-   * Calculates total realized PnL since margin fetch time.
-   * @param symbol Trading pair (e.g., BTCUSDT).
-   * @returns Total realized PnL.
-   * @throws Error if fetching trades fails.
-   */
-  private async calculatePnL(symbol: string): Promise<number> {
-    if (!this.marginFetchTime) {
-      this.logger.error('Margin fetch time not set. Run fetchInitialMargin first.');
-      throw new Error('Margin fetch time not set');
-    }
-    try {
-      const trades = await this.callBinanceApi('GET', '/fapi/v1/userTrades', {
-        symbol,
-        startTime: this.marginFetchTime,
-      });
-      const totalPnL = trades.reduce((sum: number, trade: any) => sum + parseFloat(trade.realizedPnl), 0);
-      this.logger.debug(`Total realized PnL for ${symbol} since ${new Date(this.marginFetchTime).toISOString()}: ${totalPnL}`);
-      return totalPnL;
-    } catch (error: any) {
-      this.logger.error(`Failed to calculate PnL for ${symbol}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Checks if trading is allowed based on PnL loss limit.
-   * @param symbol Trading pair (e.g., BTCUSDT).
+   * Checks unrealized loss from open positions against initial margin.
+   * Closes all positions and blocks trading if loss exceeds 10%.
    * @returns Risk check result.
    */
-  private async checkPnL(symbol: string): Promise<RiskCheckResult> {
+  public async checkUnrealizedLoss(): Promise<RiskCheckResult> {
     if (!this.initialMargin) {
       return { canTrade: false, reason: 'Initial margin not fetched' };
     }
     try {
-      const totalPnL = await this.calculatePnL(symbol);
+      const positions = await this.callBinanceApi('GET', '/fapi/v3/positionRisk', {});
+      const totalUnrealizedLoss = positions.reduce((sum: number, pos: any) => {
+        return sum + parseFloat(pos.unRealizedProfit);
+      }, 0);
       const maxLoss = this.initialMargin * this.MAX_LOSS_PERCENTAGE;
-      if (totalPnL < -maxLoss) {
-        this.logger.warn(`Trading blocked: Loss (${totalPnL}) exceeds 10% of initial margin (${maxLoss})`);
-        return { canTrade: false, reason: `Loss exceeds 10% of initial margin` };
+      this.logger.debug(`Total unrealized loss: ${totalUnrealizedLoss}, Max allowed loss: ${maxLoss}`);
+
+      if (totalUnrealizedLoss < -maxLoss) {
+        this.logger.warn(`Unrealized loss (${totalUnrealizedLoss}) exceeds 10% of initial margin (${maxLoss})`);
+        await this.forceClosePositions();
+        this.isTradingBlocked = true;
+        return {
+          canTrade: false,
+          reason: 'Unrealized loss exceeds 10% of initial margin. All positions closed and trading blocked.',
+        };
       }
       return { canTrade: true };
     } catch (error: any) {
-      this.logger.error(`PnL check failed: ${error.message}`);
-      return { canTrade: false, reason: `PnL check failed: ${error.message}` };
+      this.logger.error(`Unrealized loss check failed: ${error.message}`);
+      return { canTrade: false, reason: `Unrealized loss check failed: ${error.message}` };
     }
-  }
-
-  /**
-   * Fetches and classifies news (mock implementation).
-   * @returns Array of classified news items.
-   */
-  private async fetchNews(attempts = 3, delay = 5000): Promise<NewsItem[]> {
-    // Check cache
-    if (this.lastNewsFetch && Date.now() - this.lastNewsFetch < this.NEWS_CACHE_DURATION && this.cachedNews.length > 0) {
-      this.logger.debug('Returning cached news data');
-      return this.cachedNews;
-    }
-
-    for (let i = 0; i < attempts; i++) {
-      try {
-        this.logger.debug('Fetching news from economic calendar API');
-        const response = await axios.get(this.NEWS_API_URL);
-        const data = response.data;
-
-        if (!Array.isArray(data)) {
-          throw new Error('Invalid news data format: Expected an array');
-        }
-
-        const newsItems: NewsItem[] = data.map((item: any, index: number) => {
-          const impact = item.impact === 'Holiday' ? 'HOLIDAY' : item.impact.toUpperCase();
-          if (!['HIGH', 'MEDIUM', 'LOW', 'HOLIDAY'].includes(impact)) {
-            this.logger.warn(`Invalid impact value for event "${item.title}": ${item.impact}`);
-          }
-          return {
-            id: `${item.title}-${item.date}-${index}`, // Unique ID
-            title: item.title,
-            timestamp: Date.parse(item.date), // Convert ISO 8601 to ms
-            impact: impact as 'HIGH' | 'MEDIUM' | 'LOW' | 'HOLIDAY',
-          };
-        }).filter((item: NewsItem) => ['HIGH', 'MEDIUM', 'LOW', 'HOLIDAY'].includes(item.impact));
-
-        this.cachedNews = newsItems;
-        this.lastNewsFetch = Date.now();
-        this.logger.debug(`Fetched ${newsItems.length} news items from API`);
-        console.log(newsItems)
-        return newsItems;
-      } catch (error: any) {
-        this.logger.error(`Attempt ${i + 1} failed to fetch news: ${error.message}`);
-        if (i < attempts - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        } else {
-          this.logger.error('Failed to fetch news after all attempts');
-          throw new Error(`Failed to fetch news: ${error.message}`);
-        }
-      }
-    }
-    return []; // Fallback (never reached due to throw)
   }
 
   /**
    * Checks if trading is restricted due to high-impact news.
    * @returns Risk check result.
    */
-  private async restrictTradingByNews(): Promise<RiskCheckResult> {
+  public async restrictTradingByNews(): Promise<RiskCheckResult> {
     try {
-      const news = await this.fetchNews();
+      const news = await this.newsService.getNews();
       const now = Date.now();
-      const windowMs = this.NEWS_WINDOW_MINUTES * 60 * 1000; // 30 minutes in ms
+      const windowMs = this.NEWS_WINDOW_MINUTES * 60 * 1000;
+
       for (const item of news) {
         if (item.impact === 'HIGH') {
           const newsTime = item.timestamp;
           if (now >= newsTime - windowMs && now <= newsTime + windowMs) {
             this.logger.warn(`Trading blocked due to high-impact news: ${item.title}`);
             return { canTrade: false, reason: `High-impact news: ${item.title}` };
-          }
-          // Check if within 30 minutes before news to force close positions
-          if (now >= newsTime - windowMs && now < newsTime) {
-            await this.forceClosePositions();
           }
         }
       }
@@ -260,22 +187,56 @@ export class RiskManagementService {
   }
 
   /**
-   * Checks if trading is allowed based on risk rules (PnL and news).
+   * Temporary check to restrict trading to only one open position (for testing).
+   * @returns Risk check result.
+   */
+  private async restrictToOnePosition(): Promise<RiskCheckResult> {
+    try {
+      const positions = await this.callBinanceApi('GET', '/fapi/v3/positionRisk', {});
+      const openPositions = positions.filter((pos: any) => parseFloat(pos.positionAmt) !== 0);
+      if (openPositions.length >= 3) {
+        this.logger.warn(`Trading blocked: Only one open position allowed (current: ${openPositions.length})`);
+        return { canTrade: false, reason: `Only one open position allowed` };
+      }
+      return { canTrade: true };
+    } catch (error: any) {
+      this.logger.error(`Position restriction check failed: ${error.message}`);
+      return { canTrade: false, reason: `Position check failed: ${error.message}` };
+    }
+  }
+
+  /**
+   * Checks if trading is allowed based on risk rules (unrealized loss and news).
    * @param symbol Trading pair (e.g., BTCUSDT).
    * @returns Risk check result.
    */
   async canTrade(symbol: string): Promise<RiskCheckResult> {
     try {
-      // Check PnL
-      const pnlCheck = await this.checkPnL(symbol);
-      if (!pnlCheck.canTrade) {
-        return pnlCheck;
+      // Check if trading is blocked due to previous unrealized loss trigger
+      if (this.isTradingBlocked) {
+        return { canTrade: false, reason: 'Trading blocked due to previous unrealized loss exceeding 10%' };
       }
+
+      // // Temporary: Restrict to one open position
+      // if (this.RESTRICT_ONE_POSITION) {
+      //   const positionCheck = await this.restrictToOnePosition();
+      //   if (!positionCheck.canTrade) {
+      //     return positionCheck;
+      //   }
+      // }
+
+      // Check unrealized loss
+      const unrealizedLossCheck = await this.checkUnrealizedLoss();
+      if (!unrealizedLossCheck.canTrade) {
+        return unrealizedLossCheck;
+      }
+
       // Check news restrictions
       const newsCheck = await this.restrictTradingByNews();
       if (!newsCheck.canTrade) {
         return newsCheck;
       }
+
       this.logger.debug(`Trading allowed for ${symbol}`);
       return { canTrade: true };
     } catch (error: any) {

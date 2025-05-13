@@ -7,6 +7,7 @@ import { SharedModule } from '../shared/shared.module';
 import {HistoricalDataService} from './services/historical-data-binance.service';
 import { TradeService } from './services/trading-binance.service';
 import {RiskManagementService} from './services/risk-management.service';
+import { NewsService } from './services/news.service';
 
 @Module({
   imports: [HttpModule, ConfigModule, SharedModule],
@@ -16,6 +17,7 @@ import {RiskManagementService} from './services/risk-management.service';
     HistoricalDataService,
     TradeService,
     RiskManagementService,
+    NewsService
 
   ],
   //exports: [AnalyzeAgentService],
